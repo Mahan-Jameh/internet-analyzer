@@ -166,13 +166,12 @@ def _translate_dynamic_fa(text: str) -> str:
     stripped = text.strip()
     if not stripped:
         return text
+    # Several lines: translate each on its own. A template such as "Likely: {}" would otherwise
+    # swallow the whole multi-line text as one value.
+    if "\n" in stripped:
+        return "\n".join(_translate_dynamic_fa(line) for line in stripped.split("\n"))
     result = _lookup(stripped)
-    if result is None:
-        # Several sentences joined by a space or newline: translate line by line.
-        if "\n" in stripped:
-            return "\n".join(_translate_dynamic_fa(line) for line in stripped.split("\n"))
-        return text
-    return result
+    return text if result is None else result
 
 
 def translate_dynamic(text: str, lang: Optional[str] = None) -> str:
