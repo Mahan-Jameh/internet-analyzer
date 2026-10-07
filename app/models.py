@@ -31,9 +31,12 @@ class CheckResult:
     details: dict[str, Any] = field(default_factory=dict)
     duration_ms: float | None = None
     timestamp: datetime = field(default_factory=datetime.now)
+    # Detailed, machine-readable result (app.diag.results.TestResult) when the
+    # producing module provides one. ``status`` above is then derived from it.
+    result: Any | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "name": self.name,
             "status": self.status.value,
             "message": self.message,
@@ -41,6 +44,9 @@ class CheckResult:
             "duration_ms": self.duration_ms,
             "timestamp": self.timestamp.isoformat(),
         }
+        if self.result is not None:
+            data["result"] = self.result.to_dict()
+        return data
 
 
 @dataclass
@@ -51,6 +57,9 @@ class ModuleReport:
     checks: list[CheckResult] = field(default_factory=list)
     started_at: datetime = field(default_factory=datetime.now)
     finished_at: datetime | None = None
+    # Detailed results that do not belong to a single check card (e.g. one per
+    # domain and resolver). They feed the correlation engine and the JSON report.
+    results: list[Any] = field(default_factory=list)
 
     def add(self, check: CheckResult) -> None:
         self.checks.append(check)
@@ -80,6 +89,7 @@ class ModuleReport:
             "started_at": self.started_at.isoformat(),
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "checks": [c.to_dict() for c in self.checks],
+            **({"results": [r.to_dict() for r in self.results]} if self.results else {}),
         }
 
 
@@ -97,6 +107,13 @@ class NetworkInfo:
     adapter_name: str | None = None
     gateway: str | None = None
     internet_reachable: bool = False
+    # Layered detail (schema v2). The booleans above stay for compatibility.
+    ipv4_state: str = "Unknown"          # Available / Not configured / Configured, no Internet access
+    ipv6_state: str = "Unknown"
+    public_ip_state: str = "NOT_TESTED"  # PUBLIC_IP_DETECTED / LOOKUP_FAILED / NOT_AVAILABLE / NOT_TESTED
+    gateway_reachable: bool | None = None
+    ip_layers: dict[str, Any] = field(default_factory=dict)   # {"ipv4": {...}, "ipv6": {...}}
+    test_results: list[Any] = field(default_factory=list)     # TestResult objects (not serialized here)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -110,6 +127,11 @@ class NetworkInfo:
             "adapter_name": self.adapter_name,
             "gateway": self.gateway,
             "internet_reachable": self.internet_reachable,
+            "ipv4_state": self.ipv4_state,
+            "ipv6_state": self.ipv6_state,
+            "public_ip_state": self.public_ip_state,
+            "gateway_reachable": self.gateway_reachable,
+            "ip_layers": self.ip_layers,
         }
 
 
@@ -133,15 +155,44 @@ class FullReport:
     duration_seconds: float | None = None
     cancelled: bool = False
     target_host: str | None = None
+    # Correlation result (app.diag.correlation.DiagnosticSummary); None for old / hand-built reports.
+    summary: Any | None = None
+
+    def all_results(self) -> list[Any]:
+        from app.diag.reportlayers import collect_results
+        return collect_results(self.modules, self.network_info)
+
+    def layers(self) -> dict[str, Any]:
+        from app.diag.reportlayers import build_layers
+        return build_layers(self.summary, self.all_results())
 
     def to_dict(self) -> dict[str, Any]:
+        """
+        History / JSON format, ``schema_version`` 2.
+
+        The version-1 keys (``generated_at`` ... ``interpretations``) are kept at the top level so
+        old readers keep working; the new keys are ``run``, ``tests``, ``diagnoses``, ``summary``
+        and ``layers``. Readers must treat every new key as optional (see ``normalize_report_dict``).
+        """
+        from app.diag.reportlayers import SCHEMA_VERSION
+        layers = self.layers()
         return {
+            "schema_version": SCHEMA_VERSION,
+            "run": {
+                "generated_at": self.generated_at.isoformat(), "duration_seconds": self.duration_seconds,
+                "cancelled": self.cancelled, "profile_name": self.profile_name,
+                "target_host": self.target_host,
+            },
             "generated_at": self.generated_at.isoformat(),
             "profile_name": self.profile_name,
             "duration_seconds": self.duration_seconds,
             "cancelled": self.cancelled,
             "target_host": self.target_host,
             "network_info": self.network_info.to_dict(),
+            "summary": layers["overall_summary"],
+            "diagnoses": layers["root_cause"],
+            "key_findings": layers["key_findings"],
+            "tests": [r.to_dict() for r in self.all_results()],
             "modules": [m.to_dict() for m in self.modules],
             "interpretations": [
                 {"text": i.text, "severity": i.severity.value} for i in self.interpretations

@@ -93,3 +93,97 @@ def test_compare_reports_detects_changes():
     assert changes == {"a": DEGRADED, "b": IMPROVED, "d": NEW}
     assert result.unchanged_count == 1
     assert [c.label for c in result.network_changes] == ["Public IP"]
+
+
+# ---- environment evidence ----------------------------------------------
+def test_environment_detection_is_info_not_failure(monkeypatch):
+    from app.core.environment_check import EnvironmentChecker
+    from app.diag.results import Severity
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8080")
+    check = EnvironmentChecker()._env_proxy()
+    assert check.details["suspected"] is True and check.result.metadata["detected"] is True
+    assert check.result.severity is Severity.INFO and check.result.category == "proxy"
+    assert check.status.value != "FAILED"
+
+
+def test_environment_proxy_absent(monkeypatch):
+    from app.core.environment_check import EnvironmentChecker
+    from app.constants import PROXY_ENV_VARS
+    for v in PROXY_ENV_VARS:
+        monkeypatch.delenv(v, raising=False)
+    check = EnvironmentChecker()._env_proxy()
+    assert check.result.metadata["detected"] is False and check.details["suspected"] is False
+
+
+IPCONFIG = """
+Ethernet adapter Ethernet:
+
+   Description . . . . . . . . . . . : Intel(R) Ethernet Connection
+   IPv4 Address. . . . . . . . . . . : 192.168.1.20(Preferred)
+   DNS Servers . . . . . . . . . . . : 192.168.1.1
+
+Unknown adapter WireGuard Tunnel:
+
+   Description . . . . . . . . . . . : WireGuard Tunnel
+   IPv4 Address. . . . . . . . . . . : 10.66.66.2(Preferred)
+   DNS Servers . . . . . . . . . . . : 10.66.66.1
+                                       1.1.1.1
+
+Ethernet adapter vEthernet (WSL):
+
+   Description . . . . . . . . . . . : Hyper-V Virtual Ethernet Adapter
+   IPv4 Address. . . . . . . . . . . : 172.20.0.1
+Unknown adapter Wintun:
+
+   Description . . . . . . . . . . . : Wintun Userspace Tunnel
+   Media State . . . . . . . . . . . : Media disconnected
+"""
+
+
+def test_vpn_connected_virtual_and_dns_evidence(monkeypatch):
+    from app.core import environment_check as ec
+    monkeypatch.setattr(ec, "IS_WINDOWS", True)
+    checks = {c.name: c for c in ec.EnvironmentChecker().evaluate_adapters(IPCONFIG)}
+    vpn = checks["VPN / Tunnel Adapters"]
+    assert vpn.result.metadata["detected"] and vpn.details["connected"] is True
+    assert vpn.result.metrics["connected"] == ["Unknown adapter WireGuard Tunnel:"]
+    assert checks["Virtual Adapters"].result.metadata["detected"]
+    dns = checks["DNS Through Tunnel Adapter"]
+    assert set(dns.result.metadata["detail"]) == {"DNS server 10.66.66.1 is set on a tunnel adapter",
+                                                  "DNS server 1.1.1.1 is set on a tunnel adapter"}
+    assert all(c.result.severity.value == "INFO" for c in checks.values())
+
+
+def test_vpn_absent(monkeypatch):
+    from app.core import environment_check as ec
+    monkeypatch.setattr(ec, "IS_WINDOWS", True)
+    plain = "\nEthernet adapter Ethernet:\n\n   Description : Intel(R) Ethernet\n   IPv4 Address : 192.168.1.5\n"
+    checks = {c.name: c for c in ec.EnvironmentChecker().evaluate_adapters(plain)}
+    assert not checks["VPN / Tunnel Adapters"].result.metadata["detected"]
+
+
+def test_winhttp_parser():
+    from app.core.environment_check import parse_winhttp_proxy
+    assert parse_winhttp_proxy("Current WinHTTP proxy settings:\n\n    Direct access (no proxy server).\n") is None
+    assert parse_winhttp_proxy("    Proxy Server(s) :  127.0.0.1:8080\n") == "127.0.0.1:8080"
+
+
+def test_virtual_adapter_or_disconnected_vpn_is_not_a_vpn_diagnosis(monkeypatch):
+    from app.core import environment_check as ec
+    from app.diag.correlation import analyze
+    monkeypatch.setattr(ec, "IS_WINDOWS", True)
+    text = ("\nEthernet adapter vEthernet (WSL):\n\n   Description : Hyper-V Virtual Ethernet Adapter\n"
+            "   IPv4 Address : 172.20.0.1\n"
+            "Unknown adapter Wintun:\n\n   Description : Wintun Userspace Tunnel\n   Media State : Media disconnected\n")
+    checks = ec.EnvironmentChecker().evaluate_adapters(text)
+    results = [c.result for c in checks]
+    assert not any(d.diagnosis_id.endswith("_detected") for d in analyze(results).diagnoses)
+
+
+def test_connected_tunnel_gives_a_hedged_measured_diagnosis(monkeypatch):
+    from app.core import environment_check as ec
+    from app.diag.correlation import analyze
+    monkeypatch.setattr(ec, "IS_WINDOWS", True)
+    results = [c.result for c in ec.EnvironmentChecker().evaluate_adapters(IPCONFIG)]
+    diag = [d for d in analyze(results).diagnoses if d.diagnosis_id == "vpn_detected"]
+    assert len(diag) == 1 and diag[0].measured and "[" not in diag[0].evidence[0]

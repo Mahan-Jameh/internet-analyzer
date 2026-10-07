@@ -60,6 +60,7 @@ class AppSettings:
     """Small persisted settings, saved as JSON."""
 
     theme: str = "dark"
+    language: str = "fa"          # "fa" (Persian, right-to-left) or "en"
     advanced_mode: bool = False
     last_profile: str | None = None
     window_width: int = 1180

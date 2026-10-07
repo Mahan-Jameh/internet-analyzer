@@ -1,4 +1,4 @@
-# Internet Connectivity & Protocol Analyzer
+# Internet Connectivity & Protocol Analyzer (v2)
 
 A desktop diagnostic tool for ordinary users, built with **Python 3.12+**
 and **PySide6**, that helps you understand why your Internet connection
@@ -44,8 +44,13 @@ knowledge required.
 - **Protocol Whitelist Probe (optional, off by default)** - looks for a filter
   that only lets recognisable protocols through on port 443. It can make a
   filter drop your packets for about a minute, so it asks for confirmation.
-- **Analysis engine** - plain-language, probability-worded interpretations
-  ("may", "could indicate", "consistent with"), including what *is* working.
+- **Local Network & Gateway** - local interface, default route and a gateway
+  test (ICMP first, then TCP; a silent router is only a hint, never a verdict).
+- **Analysis engine** - a correlation engine looks at *all* results together and
+  produces confidence-rated diagnoses ("Detected / Likely / Possible /
+  Inconclusive") with the evidence behind each, plus plain-language,
+  probability-worded interpretations, including what *is* working.
+  Four report layers: overall summary, key findings, technical evidence, root cause.
 - **Diagnostics tab** - choose which tests to run, repeat a run N times with a
   pause, stop at any time; gray cards show tests that are waiting or not run.
 - **History tab** - every finished run is saved automatically; compare any two
@@ -55,6 +60,11 @@ knowledge required.
 - **Advanced mode** - custom target host, ports, website list, saved profiles.
 - **Logging** - daily log files plus a per-run summary line (timestamp,
   duration, errors, network info).
+- **Persian (فارسی) and English interface** - the app starts in Persian with a
+  right-to-left layout; switch any time from the *Language* menu (the report on
+  screen is kept). Exports follow the selected language: HTML (`dir="rtl"`),
+  TXT and CSV are translated, JSON always stays English so saved reports remain
+  comparable.
 - Runs without administrator privileges. Every module is isolated: a failure
   becomes an UNKNOWN result instead of crashing the app.
 
@@ -72,6 +82,7 @@ internet_analyzer/
     ├── constants.py             All fixed values (ports, timeouts, URLs, hosts)
     ├── config.py                Paths + persisted settings
     ├── logger.py                File + in-memory logging
+    ├── i18n.py / i18n_fa.py     Translation engine + Persian texts (RTL support)
     ├── models.py                Shared dataclasses
     ├── core/                    All test logic (no widgets)
     │   ├── network_info.py  environment_check.py  basic_connectivity.py
@@ -82,6 +93,10 @@ internet_analyzer/
     │   ├── analyzer.py          Results -> hedged interpretations
     │   ├── compare.py           Compare two saved reports
     │   └── worker.py            QThread runner (cancel, run summary logging)
+    ├── assets/fonts/            Google Sans + Vazirmatn (OFL)
+    ├── diag/                    Layered engine: TestResult model, normalized errors (incl. Windows
+    │                            WSA codes), retry policy, dependency graph, correlation engine,
+    │                            report layers, structured logging
     ├── gui/                     PySide6 UI (Home, Diagnostics, Advanced, History, Logs)
     ├── export/                  exporter.py (TXT/JSON/CSV/HTML), history.py
     └── utils/helpers.py         subprocess wrapper, language-independent ping parser,
@@ -98,6 +113,8 @@ venv\Scripts\activate          # Windows
 pip install -r requirements.txt
 python main.py
 ```
+
+On Windows you can also double-click `run.bat` (it starts the app and keeps the window open if an error occurs).
 
 Run the tests (they need no Internet):
 
@@ -139,6 +156,30 @@ the executable.
 - **HTTP/3** uses a real QUIC handshake when `aioquic` is installed, otherwise
   an `Alt-Svc` hint labelled as such.
 - **Threads** are stopped and awaited when the window closes.
+- **Raw observation is kept apart from interpretation.** Every result carries a
+  technical status (`TIMEOUT` is never reported as `CLOSED`), a severity and,
+  only where something was inferred, an interpretation with a confidence value.
+- **Dependency-aware runs.** Independent modules run in parallel; name-based tests
+  (TLS, HTTP, websites) are skipped - and labelled as skipped - when system DNS
+  provably fails, so one root cause does not appear as ten failures.
+- **Logs**: `icpa_YYYYMMDD.log` (readable) and `icpa_YYYYMMDD.jsonl` (one JSON object per line,
+  with a `key=value` line per test result). See `docs/REFACTOR_NOTES.md`.
+- **Translations are display-only.** Check names and messages are produced in
+  English and translated when shown or exported, so history, comparison and JSON
+  never depend on the interface language. Text without a translation is shown in
+  English rather than being lost. A test fails if a message in the test modules
+  has no Persian translation, so new messages cannot silently stay English.
+  To add a language, add a data file like `i18n_fa.py` and register it in `i18n.py`.
+
+## Fonts
+
+The UI uses **Google Sans** for Latin text and **Vazirmatn** (وزیرمتن) for
+Persian text. Both are bundled in `app/assets/fonts` and licensed under the
+SIL Open Font License 1.1 (license files included next to the fonts). The
+Google Sans files are static Regular/Bold instances of the official variable
+font from Google Fonts, reduced to Latin glyphs so Persian always falls through
+to Vazirmatn. Sources: [google/fonts](https://github.com/google/fonts/tree/main/ofl/googlesans),
+[rastikerdar/vazirmatn](https://github.com/rastikerdar/vazirmatn).
 
 ## Sources and acknowledgements
 

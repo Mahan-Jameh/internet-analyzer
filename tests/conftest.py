@@ -13,3 +13,15 @@ _TMP_HOME = tempfile.mkdtemp(prefix="icpa_test_home_")
 os.environ["HOME"] = _TMP_HOME
 os.environ["LOCALAPPDATA"] = _TMP_HOME
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _english_by_default():
+    """The app defaults to Persian; existing tests assert English text, so reset it for every test."""
+    from app import i18n
+    i18n.set_language("en")
+    yield
+    i18n.set_language("en")

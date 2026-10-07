@@ -37,6 +37,8 @@ from app.constants import (
     PROTOCOL_PROBE_TIMEOUT,
 )
 from app.logger import get_logger
+from app.diag.adapter import check_from_result
+from app.diag.results import Severity, TechnicalStatus, TestResult
 from app.models import CheckResult, ModuleReport, Status
 from app.utils.helpers import resolve_host
 
@@ -105,11 +107,35 @@ class ProtocolWhitelistProbe:
 
     def run_all(self) -> ModuleReport:
         report = ModuleReport(module_name="Protocol Whitelist Probe")
-        report.add(self._run_check())
+        check = self._run_check()
+        report.add(check)
+        if isinstance(check.result, TestResult):
+            report.results.append(check.result)
         report.finish()
         return report
 
     def _run_check(self) -> CheckResult:
+        check = self._run_check_legacy()
+        S = TechnicalStatus
+        verdict = check.details.get("verdict")
+        res = TestResult("protocol_whitelist", "protocol_whitelist", protocol="TCP",
+                         port=PROTOCOL_PROBE_MONITORED_PORT, target=PROTOCOL_PROBE_HOST,
+                         resolved_ip=check.details.get("server_ip"), duration_ms=check.duration_ms,
+                         metrics={k: v for k, v in check.details.items() if k.endswith("outcome")},
+                         metadata={"role": "whitelist_probe"}, summary=check.message)
+        res.status, res.severity = {
+            "filtered_suspected": (S.PARTIAL, Severity.WARNING),
+            "no_difference": (S.SUCCESS, Severity.OK),
+            "inconclusive": (S.INCONCLUSIVE, Severity.INFO),
+            "unreachable": (S.INCONCLUSIVE, Severity.INFO),
+        }.get(verdict, (S.INCONCLUSIVE, Severity.INFO))
+        if verdict == "filtered_suspected":
+            res.interpretation, res.confidence = "POSSIBLE_PROTOCOL_WHITELIST", 0.5
+        res.add_evidence(f"control port: {check.details.get('control_outcome', 'n/a')}; "
+                         f"monitored port: {check.details.get('monitored_outcome', 'n/a')}")
+        return check_from_result(check.name, res, message=check.message, details=check.details)
+
+    def _run_check_legacy(self) -> CheckResult:
         name = "Protocol Whitelist Probe"
         start = time.perf_counter()
         ips = resolve_host(PROTOCOL_PROBE_HOST, family=socket.AF_INET)

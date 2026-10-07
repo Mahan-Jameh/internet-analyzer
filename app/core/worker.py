@@ -6,96 +6,45 @@ GUI thread, emitting progress and per-module signals so the UI can update
 live and never freezes during long-running network tests.
 
 Guarantees:
-  * "network_info" always runs first (the analyzer needs it).
+  * "network_info" always runs (the analyzer needs it) and starts first.
+  * modules run through the dependency graph in ``app.core.runner``: independent
+    modules in parallel, name-based tests only after DNS did not provably fail.
   * one failing module never stops the others - it becomes an UNKNOWN result.
-  * the run can be cancelled between modules (``requestInterruption``).
+  * the run can be cancelled at any time (``requestInterruption`` sets a shared
+    cancel event that every module and probe checks).
   * every run is summarised in the log: timestamp, duration, errors, network info.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from datetime import datetime
-from typing import Callable, Optional
+from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from app.constants import LATENCY_TARGETS
 from app.core.analyzer import ResultAnalyzer
-from app.core.basic_connectivity import BasicConnectivityTester
-from app.core.dns_test import DNSTester
-from app.core.environment_check import EnvironmentChecker
-from app.core.http_test import HTTPTester
-from app.core.latency_test import LatencyTester
-from app.core.mtu_test import MTUTester
-from app.core.network_info import NetworkInfoCollector
-from app.core.protocol_tests import ProtocolTester
-from app.core.protocol_whitelist import ProtocolWhitelistProbe
-from app.core.site_reachability import SiteReachabilityTester
-from app.core.tcp_scanner import TCPScanner
-from app.core.tcp_stall_test import TCPStallTester
-from app.core.tls_test import TLSTester
-from app.core.udp_test import UDPTester
-from app.core.vpn_connectivity import VPNConnectivityTester
+from app.core.runner import (  # noqa: F401 - re-exported for the GUI and the tests
+    ALL_MODULES,
+    DEFAULT_MODULES,
+    MODULE_DEPENDENCIES,
+    MODULE_DISPLAY_NAMES,
+    OPT_IN_MODULES,
+    DiagnosticRunner,
+    RunParams,
+    normalize_modules,
+)
+from app.diag.testconfig import DEFAULT_CONFIG, NetworkTestConfig
 from app.logger import get_logger
-from app.models import CheckResult, FullReport, ModuleReport, NetworkInfo, Status
+from app.models import FullReport, ModuleReport, NetworkInfo
 from app.utils.helpers import validate_target_host
 
 log = get_logger(__name__)
 
-# The canonical, ordered list of every module the app can run.
-ALL_MODULES = [
-    "network_info",
-    "environment_check",
-    "basic_connectivity",
-    "dns_test",
-    "tcp_scanner",
-    "udp_test",
-    "tls_test",
-    "http_test",
-    "tcp_stall",
-    "site_reachability",
-    "protocol_tests",
-    "latency_test",
-    "mtu_test",
-    "vpn_connectivity",
-    "protocol_whitelist",
-]
-
-# Modules that are NOT part of a default run. The protocol whitelist probe
-# can interrupt the connection for a while, so the user must opt in.
-OPT_IN_MODULES = {"protocol_whitelist"}
-DEFAULT_MODULES = [m for m in ALL_MODULES if m not in OPT_IN_MODULES]
-
-# Shown by the GUI. The report of each module uses exactly the same name.
-MODULE_DISPLAY_NAMES = {
-    "network_info": "Network Information",
-    "environment_check": "Proxy & VPN Detection",
-    "basic_connectivity": "Basic Connectivity",
-    "dns_test": "DNS Test",
-    "tcp_scanner": "TCP Port Scanner",
-    "udp_test": "UDP Test",
-    "tls_test": "TLS Test",
-    "http_test": "HTTP Test",
-    "tcp_stall": "TCP Stall Test",
-    "site_reachability": "Website Reachability",
-    "protocol_tests": "Protocol Tests",
-    "latency_test": "Latency Test",
-    "mtu_test": "MTU Test",
-    "vpn_connectivity": "VPN-Related Connectivity",
-    "protocol_whitelist": "Protocol Whitelist Probe",
-}
-
-
-def normalize_modules(requested: Optional[list[str]]) -> list[str]:
-    """Keep only known modules, in canonical order, with network_info always first."""
-    wanted = set(requested) if requested else set(DEFAULT_MODULES)
-    wanted.add("network_info")
-    return [m for m in ALL_MODULES if m in wanted]
-
 
 class DiagnosticWorker(QThread):
-    """Runs the requested test modules sequentially on a background thread."""
+    """Runs the requested test modules on a background thread (dependency-aware, bounded concurrency)."""
 
     progress_message = Signal(str)
     module_started = Signal(str)
@@ -113,6 +62,7 @@ class DiagnosticWorker(QThread):
         test_sites: Optional[list[str]] = None,
         profile_name: Optional[str] = None,
         parent=None,
+        config: NetworkTestConfig = DEFAULT_CONFIG,
     ) -> None:
         super().__init__(parent)
         self.modules_to_run = normalize_modules(modules_to_run)
@@ -123,60 +73,36 @@ class DiagnosticWorker(QThread):
         self.udp_ports = udp_ports
         self.test_sites = test_sites
         self.profile_name = profile_name
+        self.config = config
+        self.cancel_event = threading.Event()
         self._network_info: NetworkInfo = NetworkInfo()
         self._module_reports: list[ModuleReport] = []
+
+    def requestInterruption(self) -> None:  # noqa: N802 - Qt API name
+        """Cancel cooperatively: probes check the shared event and stop retrying/starting."""
+        self.cancel_event.set()
+        super().requestInterruption()
 
     # ------------------------------------------------------------------ #
     def run(self) -> None:
         started_wall = datetime.now()
         started = time.perf_counter()
-        errors: list[str] = []
-        cancelled = False
-
         try:
-            for module_key in self.modules_to_run:
-                if self.isInterruptionRequested():
-                    cancelled = True
-                    log.info("Run cancelled before module %s", module_key)
-                    break
-
-                display_name = MODULE_DISPLAY_NAMES.get(module_key, module_key)
-                self.module_started.emit(display_name)
-                self.progress_message.emit(f"Starting: {display_name}")
-                module_start = time.perf_counter()
-
-                try:
-                    if module_key == "network_info":
-                        self._network_info = NetworkInfoCollector().collect()
-                        self.network_info_ready.emit(self._network_info)
-                        log.info("Network info collected in %.1f s",
-                                 time.perf_counter() - module_start)
-                        continue
-
-                    report = self._run_module(module_key)
-                    if report is None:
-                        continue
-                    report.finish()
-                    self._module_reports.append(report)
-                    self.module_finished.emit(report)
-                    log.info("Module '%s' finished in %.1f s with status %s",
-                             display_name, time.perf_counter() - module_start,
-                             report.overall_status.value)
-                except Exception as exc:  # noqa: BLE001 - one module must never kill the run
-                    log.exception("Module %s raised an exception", module_key)
-                    errors.append(f"{display_name}: {exc}")
-                    failed = ModuleReport(module_name=display_name)
-                    failed.add(CheckResult(
-                        name=display_name,
-                        status=Status.UNKNOWN,
-                        message=f"This module could not complete due to an internal error: {exc}",
-                    ))
-                    failed.finish()
-                    self._module_reports.append(failed)
-                    self.module_finished.emit(failed)
+            runner = DiagnosticRunner(
+                self.modules_to_run,
+                RunParams(self.target_host, self.tcp_ports, self.udp_ports, self.test_sites),
+                self.config, self.cancel_event,
+                progress=self.progress_message.emit,
+                on_module_started=self.module_started.emit,
+                on_module_finished=self.module_finished.emit,
+                on_network_info=self.network_info_ready.emit,
+            )
+            output = runner.run()
+            self._network_info, self._module_reports = output.network_info, output.reports
+            cancelled = output.cancelled or self.isInterruptionRequested()
 
             duration = time.perf_counter() - started
-            interpretations = ResultAnalyzer().analyze(self._network_info, self._module_reports)
+            interpretations, summary = ResultAnalyzer().analyze_full(self._network_info, self._module_reports)
             full_report = FullReport(
                 network_info=self._network_info,
                 modules=self._module_reports,
@@ -186,8 +112,9 @@ class DiagnosticWorker(QThread):
                 duration_seconds=round(duration, 2),
                 cancelled=cancelled,
                 target_host=self.target_host,
+                summary=summary,
             )
-            self._log_run_summary(full_report, errors)
+            self._log_run_summary(full_report, output.errors)
             self.progress_message.emit("Run cancelled." if cancelled else "All tests completed.")
             self.run_finished.emit(full_report)
 
@@ -204,50 +131,9 @@ class DiagnosticWorker(QThread):
             report.cancelled, len(report.modules), len(errors),
         )
         log.info(
-            "RUN NETWORK | public_ip=%s | isp=%s | country=%s | ipv4=%s | ipv6=%s | dns=%s | gateway=%s",
-            info.public_ip, info.isp, info.country, info.ipv4_available, info.ipv6_available,
+            "RUN NETWORK | public_ip=%s | isp=%s | country=%s | ipv4=%s | ipv6=%s | public_ip_state=%s | dns=%s | gateway=%s",
+            info.public_ip, info.isp, info.country, info.ipv4_state, info.ipv6_state, info.public_ip_state,
             ",".join(info.dns_servers) or "-", info.gateway,
         )
         for message in errors:
             log.error("RUN ERROR | %s", message)
-
-    def _run_module(self, module_key: str) -> Optional[ModuleReport]:
-        cb: Callable[[str], None] = self.progress_message.emit
-
-        if module_key == "environment_check":
-            return EnvironmentChecker(progress_cb=cb).run_all()
-        if module_key == "basic_connectivity":
-            return BasicConnectivityTester(
-                target_host=self.target_host or "1.1.1.1", progress_cb=cb).run_all()
-        if module_key == "dns_test":
-            return DNSTester().run_all()
-        if module_key == "tcp_scanner":
-            return TCPScanner(
-                target_host=self.target_host, ports=self.tcp_ports, progress_cb=cb).run_all()
-        if module_key == "udp_test":
-            return UDPTester(
-                target_host=self.target_host, ports=self.udp_ports, progress_cb=cb).run_all()
-        if module_key == "tls_test":
-            return TLSTester(progress_cb=cb).run_all()
-        if module_key == "http_test":
-            return HTTPTester(progress_cb=cb).run_all()
-        if module_key == "tcp_stall":
-            return TCPStallTester(progress_cb=cb).run_all()
-        if module_key == "site_reachability":
-            return SiteReachabilityTester(test_hosts=self.test_sites, progress_cb=cb).run_all()
-        if module_key == "protocol_tests":
-            return ProtocolTester(progress_cb=cb).run_all()
-        if module_key == "latency_test":
-            targets = dict(LATENCY_TARGETS)
-            if self.target_host:
-                targets["Custom target"] = self.target_host
-            return LatencyTester(targets=targets, progress_cb=cb).run_all()
-        if module_key == "mtu_test":
-            return MTUTester(host=self.target_host or "1.1.1.1", progress_cb=cb).run_all()
-        if module_key == "vpn_connectivity":
-            return VPNConnectivityTester(progress_cb=cb).run_all()
-        if module_key == "protocol_whitelist":
-            return ProtocolWhitelistProbe(progress_cb=cb).run_all()
-
-        log.warning("Unknown module key requested: %s", module_key)
-        return None

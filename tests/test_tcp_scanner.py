@@ -12,7 +12,7 @@ def test_classification_covers_posix_and_windows_codes():
     assert classify_connect_result(10054) == "reset"
     assert classify_connect_result(errno.ETIMEDOUT) == "timeout"
     assert classify_connect_result(10060) == "timeout"
-    assert classify_connect_result(errno.ENETUNREACH) == "filtered"
+    assert classify_connect_result(errno.ENETUNREACH) == "unreachable"
 
 
 def test_ports_outside_allow_list_are_dropped():

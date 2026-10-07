@@ -8,6 +8,7 @@ displayed log to a text file.
 
 from __future__ import annotations
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.config import Paths
+from app.i18n import tr, tr_fmt
 from app.logger import get_memory_log_text
 
 
@@ -32,29 +34,31 @@ class LogsTab(QWidget):
         layout.setSpacing(12)
 
         header = QHBoxLayout()
-        title = QLabel("Detailed Logs")
+        title = QLabel(tr("Detailed Logs"))
         title.setObjectName("sectionTitle")
         header.addWidget(title)
         header.addStretch(1)
 
-        refresh_btn = QPushButton("Refresh")
+        refresh_btn = QPushButton(tr("Refresh"))
         refresh_btn.setObjectName("secondaryButton")
         refresh_btn.clicked.connect(self.refresh)
         header.addWidget(refresh_btn)
 
-        save_btn = QPushButton("Save Log As...")
+        save_btn = QPushButton(tr("Save Log As..."))
         save_btn.setObjectName("secondaryButton")
         save_btn.clicked.connect(self._save_log)
         header.addWidget(save_btn)
         layout.addLayout(header)
 
-        info = QLabel(f"Log files are also automatically saved to: {Paths.LOG_DIR}")
+        info = QLabel(tr_fmt("Log files are also automatically saved to: {}", Paths.LOG_DIR))
         info.setObjectName("mutedLabel")
         info.setWordWrap(True)
         layout.addWidget(info)
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
+        # Log lines are English technical text: always show them left-to-right.
+        self.log_view.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         self.log_view.setStyleSheet("font-family: Consolas, monospace; font-size:12px;")
         layout.addWidget(self.log_view, stretch=1)
 
@@ -67,13 +71,13 @@ class LogsTab(QWidget):
 
     def _save_log(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Log", str(Paths.LOG_DIR / "exported_log.txt"), "Text Files (*.txt)"
+            self, tr("Save Log"), str(Paths.LOG_DIR / "exported_log.txt"), tr("Text Files (*.txt)")
         )
         if not path:
             return
         try:
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(self.log_view.toPlainText())
-            QMessageBox.information(self, "Saved", f"Log saved to:\n{path}")
+            QMessageBox.information(self, tr("Saved"), tr_fmt("Log saved to:\n{}", path))
         except OSError as exc:
-            QMessageBox.critical(self, "Save Failed", f"Could not save log: {exc}")
+            QMessageBox.critical(self, tr("Save Failed"), tr_fmt("Could not save log: {}", exc))

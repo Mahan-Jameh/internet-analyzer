@@ -7,6 +7,8 @@ used consistently across every widget (status colors, backgrounds).
 
 from __future__ import annotations
 
+from app.gui.fonts import css_font_stack
+
 COLOR_BG = "#1c1d24"
 COLOR_BG_PANEL = "#25262f"
 COLOR_BG_CARD = "#2a2c38"
@@ -38,8 +40,12 @@ DARK_STYLESHEET = f"""
 QMainWindow, QWidget {{
     background-color: {COLOR_BG};
     color: {COLOR_TEXT};
-    font-family: "Segoe UI", Arial, sans-serif;
+    font-family: {css_font_stack()};
     font-size: 13px;
+}}
+
+QLabel {{
+    background: transparent;
 }}
 
 QTabWidget::pane {{

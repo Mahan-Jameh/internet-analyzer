@@ -10,6 +10,7 @@ being available to the in-app "detailed log" viewer through
 
 from __future__ import annotations
 
+import json
 import logging
 import logging.handlers
 from collections import deque
@@ -43,6 +44,25 @@ class InMemoryLogHandler(logging.Handler):
         return "\n".join(self.records)
 
 
+class JsonLinesHandler(logging.handlers.RotatingFileHandler):
+    """One JSON object per line: time, level, logger, message and - for test results - ``event``."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            entry = {
+                "time": datetime.fromtimestamp(record.created).isoformat(timespec="milliseconds"),
+                "level": record.levelname, "logger": record.name, "message": record.getMessage(),
+            }
+            event = getattr(record, "event", None)
+            if event is not None:
+                entry["event"] = event
+            self.stream = self.stream or self._open()
+            self.stream.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+            self.flush()
+        except Exception:
+            pass  # a logging handler must never raise
+
+
 _memory_handler = InMemoryLogHandler()
 
 
@@ -70,6 +90,9 @@ def _configure_root() -> None:
     root.setLevel(logging.DEBUG)
     root.addHandler(file_handler)
     root.addHandler(console_handler)
+    json_handler = JsonLinesHandler(Paths.LOG_DIR / f"icpa_{datetime.now():%Y%m%d}.jsonl",
+                                    maxBytes=4_000_000, backupCount=3, encoding="utf-8")
+    root.addHandler(json_handler)
     root.addHandler(_memory_handler)
     root.propagate = False
 

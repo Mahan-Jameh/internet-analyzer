@@ -13,39 +13,92 @@ certainty about network policy.
 
 from __future__ import annotations
 
+from app.core.network_info import IP_STATE_NO_INTERNET
+from app.diag import correlation
+from app.diag.correlation import DiagnosticSummary, OverallStatus
+from app.diag.reportlayers import collect_results
+from app.diag.results import Severity
 from app.logger import get_logger
 from app.models import CheckResult, Interpretation, ModuleReport, NetworkInfo, Status
 
 log = get_logger(__name__)
 
 
+_SEVERITY_TO_STATUS = {
+    Severity.CRITICAL: Status.FAILED, Severity.ERROR: Status.FAILED, Severity.WARNING: Status.WARNING,
+    Severity.INFO: Status.OK, Severity.OK: Status.OK, Severity.SKIPPED: Status.OK,
+}
+_OVERALL_TO_STATUS = {
+    OverallStatus.HEALTHY: Status.OK, OverallStatus.DEGRADED: Status.WARNING,
+    OverallStatus.DISRUPTED: Status.FAILED, OverallStatus.INCONCLUSIVE: Status.UNKNOWN,
+}
+
+
+def _dedupe(items: list[Interpretation]) -> list[Interpretation]:
+    seen: set[str] = set()
+    out: list[Interpretation] = []
+    for item in items:
+        if item.text not in seen:
+            seen.add(item.text)
+            out.append(item)
+    return out
+
+
 class ResultAnalyzer:
+    """
+    Two cooperating layers:
+
+    * the correlation engine (``app.diag.correlation``) looks at every normalized result at once and
+      produces confidence-rated diagnoses - this is the authority on root causes;
+    * the legacy module-specific summaries below add detail lines. They are suppressed when the
+      correlation engine already concluded that the Internet is unavailable, so that a pile of
+      secondary failures is never listed as separate problems.
+    """
+
+    last_summary: DiagnosticSummary | None = None
+
     def analyze(self, network_info: NetworkInfo, modules: list[ModuleReport]) -> list[Interpretation]:
-        interpretations: list[Interpretation] = []
+        return self.analyze_full(network_info, modules)[0]
+
+    def analyze_full(self, network_info: NetworkInfo,
+                     modules: list[ModuleReport]) -> tuple[list[Interpretation], DiagnosticSummary]:
+        summary = correlation.analyze(collect_results(modules, network_info))
+        self.last_summary = summary
         by_name = {m.module_name: m for m in modules}
+        interpretations: list[Interpretation] = []
 
-        interpretations.extend(self._basic_summary(network_info, by_name))
-        interpretations.extend(self._dns_summary(by_name))
-        interpretations.extend(self._tcp_summary(by_name))
-        interpretations.extend(self._udp_summary(by_name))
-        interpretations.extend(self._tls_summary(by_name))
-        interpretations.extend(self._http_summary(by_name))
-        interpretations.extend(self._protocol_summary(by_name))
-        interpretations.extend(self._latency_summary(by_name))
-        interpretations.extend(self._mtu_summary(by_name))
-        interpretations.extend(self._ip_version_summary(network_info))
-        interpretations.extend(self._sni_summary(by_name))
-        interpretations.extend(self._behavior_summary(by_name))
-        interpretations.extend(self._advanced_signals(by_name))
-        interpretations.extend(self._environment_signals(by_name))
-        interpretations.extend(self._positive_summary(by_name))
+        interpretations.append(Interpretation(summary.headline, _OVERALL_TO_STATUS[summary.overall]))
+        for diag in summary.diagnoses:
+            # One line per fact, so that every line can be translated on its own.
+            lines = [diag.headline]
+            lines += [f"Evidence: {e.rstrip('.')}" if not e.endswith("...") else f"Evidence: {e}"
+                      for e in diag.evidence[:3]]
+            if diag.possible_causes:
+                lines.append("Possible causes: " + "; ".join(diag.possible_causes[:4]))
+            if diag.caveats:
+                lines.append(f"Note: {diag.caveats[0]}")
+            interpretations.append(Interpretation("\n".join(lines),
+                                                  _SEVERITY_TO_STATUS.get(diag.severity, Status.WARNING)))
 
-        if not interpretations:
-            interpretations.append(
-                Interpretation("No notable issues were detected in this run.", Status.OK)
-            )
-
-        return interpretations
+        covered = {d.diagnosis_id for d in summary.diagnoses}
+        if summary.overall is not OverallStatus.DISRUPTED:
+            for summarize in (self._dns_summary, self._tcp_summary, self._udp_summary, self._tls_summary,
+                              self._http_summary, self._protocol_summary, self._latency_summary,
+                              self._mtu_summary, self._sni_summary, self._behavior_summary,
+                              self._advanced_signals):
+                # The correlation engine already explained these; do not say it twice in other words.
+                if summarize in (self._dns_summary,) and covered & {"dns_interference", "dns_failure"}:
+                    continue
+                if summarize in (self._sni_summary,) and "sni_filtering" in covered:
+                    continue
+                interpretations.extend(summarize(by_name))
+            interpretations.extend(self._ip_version_summary(network_info))
+            interpretations.extend(self._positive_summary(by_name))
+        if not covered & {"vpn_detected", "proxy_detected"}:
+            interpretations.extend(self._environment_signals(by_name))
+        else:
+            interpretations.extend(self._environment_signals(by_name, proxy_vpn=False))
+        return _dedupe(interpretations), summary
 
     # ------------------------------------------------------------------ #
     def _find(self, module: ModuleReport | None, name_substring: str) -> CheckResult | None:
@@ -410,11 +463,11 @@ class ResultAnalyzer:
                 ))
         return out
 
-    def _environment_signals(self, by_name: dict[str, ModuleReport]) -> list[Interpretation]:
+    def _environment_signals(self, by_name: dict[str, ModuleReport], proxy_vpn: bool = True) -> list[Interpretation]:
         out: list[Interpretation] = []
 
         env = by_name.get("Proxy & VPN Detection")
-        if env is not None and any(c.details.get("suspected") for c in env.checks):
+        if proxy_vpn and env is not None and any(c.details.get("suspected") for c in env.checks):
             out.append(Interpretation(
                 "A proxy or VPN/tunnel may be active on this computer. If it is, every test "
                 "here measured that tunnel rather than your direct Internet connection, so "
@@ -461,7 +514,14 @@ class ResultAnalyzer:
 
     def _ip_version_summary(self, info: NetworkInfo) -> list[Interpretation]:
         out: list[Interpretation] = []
-        if not info.ipv6_available:
+        if info.ipv6_state == IP_STATE_NO_INTERNET:
+            out.append(Interpretation(
+                "IPv6 is configured on this computer, but connections to external IPv6 hosts "
+                "failed. Programs that prefer IPv6 may be slow to fall back to IPv4; the router or "
+                "ISP may not provide working IPv6.",
+                Status.WARNING,
+            ))
+        elif not info.ipv6_available:
             out.append(Interpretation(
                 "IPv6 connectivity is unavailable on this network. This is common and usually "
                 "not an issue by itself, since most services still work fine over IPv4.",

@@ -55,6 +55,11 @@ def main() -> int:
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
 
+    from app.gui import fonts
+
+    fonts.load_bundled_fonts()
+    fonts.apply_default_font(app)
+
     window = MainWindow()
     window.show()
 

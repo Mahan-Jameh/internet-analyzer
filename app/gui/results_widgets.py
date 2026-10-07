@@ -26,6 +26,7 @@ from app.gui.styles import (
     STATUS_COLOR_MAP,
     STATUS_SYMBOL_MAP,
 )
+from app.i18n import is_rtl, tr, translate_dynamic, tr_status
 from app.models import CheckResult, ModuleReport, NetworkInfo
 
 
@@ -41,7 +42,7 @@ class StatusBadge(QLabel):
         """``text`` overrides the shown label (e.g. "NOT TESTED") while keeping the color."""
         color = STATUS_COLOR_MAP.get(status_value, STATUS_COLOR_MAP["UNKNOWN"])
         symbol = STATUS_SYMBOL_MAP.get(status_value, "•")
-        self.setText(f" {symbol} {text or status_value} ")
+        self.setText(f" {symbol} {tr_status(text or status_value)} ")
         self.setStyleSheet(
             f"background-color:{color}; color:#12131a; border-radius:9px; "
             f"padding:2px 10px; font-weight:700;"
@@ -62,12 +63,12 @@ class CheckResultRow(QFrame):
         layout.addWidget(badge)
 
         text_col = QVBoxLayout()
-        name_label = QLabel(check.name)
+        name_label = QLabel(translate_dynamic(check.name))
         name_label.setStyleSheet("font-weight:600;")
         text_col.addWidget(name_label)
 
         if check.message:
-            msg_label = QLabel(check.message)
+            msg_label = QLabel(translate_dynamic(check.message))
             msg_label.setStyleSheet(f"color:{COLOR_TEXT_MUTED};")
             msg_label.setWordWrap(True)
             text_col.addWidget(msg_label)
@@ -102,7 +103,7 @@ class ModuleResultCard(QFrame):
         self.toggle_btn.clicked.connect(self._toggle)
         header.addWidget(self.toggle_btn)
 
-        title = QLabel(report.module_name)
+        title = QLabel(translate_dynamic(report.module_name))
         title.setObjectName("sectionTitle")
         header.addWidget(title)
         header.addStretch(1)
@@ -119,9 +120,8 @@ class ModuleResultCard(QFrame):
     def _toggle(self) -> None:
         self._expanded = not self._expanded
         self.body.setVisible(self._expanded)
-        self.toggle_btn.setArrowType(
-            Qt.ArrowType.DownArrow if self._expanded else Qt.ArrowType.RightArrow
-        )
+        collapsed_arrow = Qt.ArrowType.LeftArrow if is_rtl() else Qt.ArrowType.RightArrow
+        self.toggle_btn.setArrowType(Qt.ArrowType.DownArrow if self._expanded else collapsed_arrow)
 
 
 class PlaceholderCard(QFrame):
@@ -136,7 +136,7 @@ class PlaceholderCard(QFrame):
         )
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 10, 14, 10)
-        title = QLabel(module_name)
+        title = QLabel(translate_dynamic(module_name))
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
         layout.addStretch(1)
@@ -152,13 +152,17 @@ class InfoBox(QFrame):
 
     def __init__(self, label: str, value: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        # Scoped to this frame only: an unscoped rule would also draw a border around
+        # the label and value widgets inside it.
+        self.setObjectName("infoBox")
         self.setStyleSheet(
-            f"background-color:{COLOR_BG_CARD}; border-radius:8px; border:1px solid {COLOR_BORDER};"
+            f"#infoBox {{ background-color:{COLOR_BG_CARD}; border-radius:8px; "
+            f"border:1px solid {COLOR_BORDER}; }}"
         )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 10, 14, 10)
 
-        label_widget = QLabel(label.upper())
+        label_widget = QLabel(tr(label) if is_rtl() else label.upper())
         label_widget.setStyleSheet(f"color:{COLOR_TEXT_MUTED}; font-size:11px; letter-spacing:1px;")
         layout.addWidget(label_widget)
 
@@ -169,6 +173,13 @@ class InfoBox(QFrame):
 
     def set_value(self, value: str) -> None:
         self.value_widget.setText(value)
+
+
+def _ip_state_text(state: str, available: bool) -> str:
+    """Layered IP state when known ("Not configured" is different from "no Internet access")."""
+    if state and state != "Unknown":
+        return translate_dynamic(state)
+    return tr("Yes") if available else tr("No")
 
 
 class NetworkInfoGrid(QWidget):
@@ -185,18 +196,20 @@ class NetworkInfoGrid(QWidget):
             "IPv4 Available", "IPv6 Available", "DNS Servers", "Network Adapter", "Gateway",
         ]
         for i, field_name in enumerate(fields):
-            box = InfoBox(field_name, "Loading...")
+            box = InfoBox(field_name, tr("Loading..."))
             self.boxes[field_name] = box
             self.grid.addWidget(box, i // 3, i % 3)
 
     def update_info(self, info: NetworkInfo) -> None:
-        self.boxes["Internet Status"].set_value("Connected" if info.internet_reachable else "Not Connected")
-        self.boxes["Public IP"].set_value(info.public_ip or "N/A")
-        self.boxes["ISP"].set_value(info.isp or "N/A")
-        self.boxes["Country"].set_value(info.country or "N/A")
-        self.boxes["City"].set_value(info.city or "N/A")
-        self.boxes["IPv4 Available"].set_value("Yes" if info.ipv4_available else "No")
-        self.boxes["IPv6 Available"].set_value("Yes" if info.ipv6_available else "No")
-        self.boxes["DNS Servers"].set_value(", ".join(info.dns_servers) if info.dns_servers else "N/A")
-        self.boxes["Network Adapter"].set_value(info.adapter_name or "N/A")
-        self.boxes["Gateway"].set_value(info.gateway or "N/A")
+        na = tr("N/A")
+        self.boxes["Internet Status"].set_value(
+            tr("Connected") if info.internet_reachable else tr("Not Connected"))
+        self.boxes["Public IP"].set_value(info.public_ip or na)
+        self.boxes["ISP"].set_value(info.isp or na)
+        self.boxes["Country"].set_value(info.country or na)
+        self.boxes["City"].set_value(info.city or na)
+        self.boxes["IPv4 Available"].set_value(_ip_state_text(info.ipv4_state, info.ipv4_available))
+        self.boxes["IPv6 Available"].set_value(_ip_state_text(info.ipv6_state, info.ipv6_available))
+        self.boxes["DNS Servers"].set_value(", ".join(info.dns_servers) if info.dns_servers else na)
+        self.boxes["Network Adapter"].set_value(info.adapter_name or na)
+        self.boxes["Gateway"].set_value(info.gateway or na)

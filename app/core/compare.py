@@ -25,6 +25,9 @@ _NETWORK_FIELDS = [
     ("isp", "ISP"),
     ("country", "Country"),
     ("city", "City"),
+    ("ipv4_state", "IPv4"),
+    ("ipv6_state", "IPv6"),
+    ("public_ip_state", "Public IP lookup"),
     ("ipv4_available", "IPv4 available"),
     ("ipv6_available", "IPv6 available"),
     ("dns_servers", "DNS servers"),
@@ -125,7 +128,8 @@ def compare_reports(old: dict[str, Any], new: dict[str, Any]) -> ComparisonResul
     net_changes = [
         NetworkChange(label, _fmt(old_net.get(key)), _fmt(new_net.get(key)))
         for key, label in _NETWORK_FIELDS
-        if old_net.get(key) != new_net.get(key)
+        # a key present in only one report (v1 vs v2 files) is not a real change
+        if (key in old_net and key in new_net) and old_net.get(key) != new_net.get(key)
     ]
 
     return ComparisonResult(diffs, net_changes, unchanged)

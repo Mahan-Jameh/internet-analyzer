@@ -90,3 +90,72 @@ def test_json_and_txt_exports_contain_new_fields():
     data = json.loads(to_json(report))
     assert data["duration_seconds"] == 3.2 and data["cancelled"] is False
     assert "DNS Test" in to_txt(report)
+
+
+# ---- schema v2 / four layers -------------------------------------------------
+def _rich_report():
+    from app.diag.adapter import check_from_result
+    from app.diag.results import TechnicalStatus as S, TestResult
+    t = TestResult("tcp.example.com.443", "tcp", status=S.TIMEOUT, target="example.com", port=443,
+                   error_code="TIMEOUT", interpretation="FILTERED_OR_UNREACHABLE", confidence=0.4,
+                   metadata={"role": "reachability"})
+    module = ModuleReport(module_name="TCP Port Scanner")
+    module.add(check_from_result("TCP 443 (HTTPS)", t))
+    module.finish()
+    report = FullReport(network_info=_info(), modules=[module], generated_at=datetime.now())
+    report.interpretations, report.summary = ResultAnalyzer().analyze_full(report.network_info, [module])
+    return report
+
+
+def test_json_is_schema_v2_and_keeps_v1_keys():
+    data = json.loads(to_json(_rich_report()))
+    assert data["schema_version"] == 2
+    for key in ("run", "tests", "diagnoses", "summary", "key_findings", "modules", "interpretations",
+                "network_info", "generated_at"):
+        assert key in data
+    assert data["tests"][0]["status"] == "TIMEOUT" and data["tests"][0]["error_code"] == "TIMEOUT"
+    assert data["network_info"]["ipv4_state"] == "Unknown"
+
+
+def test_v1_history_file_still_loads(tmp_path):
+    old = {"generated_at": "2025-01-01T10:00:00", "profile_name": None, "duration_seconds": 5,
+           "cancelled": False, "target_host": None, "network_info": {"public_ip": "1.1.1.1"},
+           "modules": [{"module_name": "DNS Test", "overall_status": "OK", "checks": []}],
+           "interpretations": []}
+    (tmp_path / "run_20250101_100000_000000.json").write_text(json.dumps(old), encoding="utf-8")
+    entries = list_history(tmp_path)
+    assert len(entries) == 1
+    data = load_report(entries[0].path)
+    assert data["schema_version"] == 1 and data["tests"] == [] and data["diagnoses"] == []
+    assert data["run"]["generated_at"] == "2025-01-01T10:00:00"
+
+
+def test_compare_v1_with_v2_reports_does_not_invent_network_changes():
+    from app.core.compare import compare_reports
+    from app.export.history import normalize_report_dict
+    old = normalize_report_dict({"modules": [], "network_info": {"public_ip": "1.1.1.1"}})
+    new = json.loads(to_json(_rich_report()))
+    result = compare_reports(old, new)
+    assert all(c.label not in ("IPv4", "IPv6", "Public IP lookup") for c in result.network_changes)
+
+
+def test_txt_and_html_show_all_four_layers_and_hedged_root_cause():
+    report = _rich_report()
+    txt = to_txt(report, "en")
+    for heading in ("1. Overall summary", "2. Key findings", "3. Technical evidence", "4. Root cause analysis"):
+        assert heading in txt
+    assert "[TIMEOUT | code=TIMEOUT" in txt                      # raw observation line
+    assert not any(w in txt.lower() for w in FORBIDDEN)
+    html_text = to_html(report, "en")
+    assert "Technical evidence" in html_text and "Root cause analysis" in html_text
+
+
+def test_csv_has_technical_columns():
+    rows = list(csv.reader(io.StringIO(to_csv(_rich_report()))))
+    assert rows[0][-6:] == ["Technical Status", "Severity", "Error Code", "OS Error", "Interpretation", "Confidence"]
+    assert rows[1][6] == "TIMEOUT" and rows[1][8] == "TIMEOUT"
+
+
+def test_persian_txt_export_has_persian_layer_headings():
+    txt = to_txt(_rich_report(), "fa")
+    assert "خلاصه‌ی کلی" in txt and "یافته‌های کلیدی" in txt and "شواهد فنی" in txt

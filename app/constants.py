@@ -8,7 +8,7 @@ contains "magic numbers" or hard-coded strings scattered around the code.
 from __future__ import annotations
 
 APP_NAME = "Internet Connectivity & Protocol Analyzer"
-APP_VERSION = "1.0.0"
+APP_VERSION = "2.0.0"
 ORG_NAME = "ICPA"
 
 # --------------------------------------------------------------------------

@@ -18,6 +18,7 @@ Runnin4ik/dpi-detector; this implementation is original.
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Callable, Optional
 
@@ -30,6 +31,9 @@ from app.constants import (
     TCP_STALL_TIMEOUT,
     TCP_STALL_URL_TEMPLATE,
 )
+from app.diag.adapter import check_from_result
+from app.diag.neterrors import normalize_wrapped_exception
+from app.diag.results import Severity, TechnicalStatus, TestResult
 from app.logger import get_logger
 from app.models import CheckResult, ModuleReport, Status
 
@@ -55,8 +59,9 @@ def classify_transfer(received: int, expected: int, completed: bool,
 
 
 class TCPStallTester:
-    def __init__(self, progress_cb: ProgressCallback = None) -> None:
+    def __init__(self, progress_cb: ProgressCallback = None, cancel: Optional[threading.Event] = None) -> None:
         self.progress_cb = progress_cb
+        self.cancel = cancel or threading.Event()
 
     def _report(self, message: str) -> None:
         if self.progress_cb:
@@ -78,16 +83,49 @@ class TCPStallTester:
                         received += len(chunk)
             return received, received >= size, ""
         except httpx.HTTPError as exc:
+            self._last_error = normalize_wrapped_exception(exc)
             return received, False, f"{exc.__class__.__name__}: {exc}"
 
     # ------------------------------------------------------------------ #
+    _last_error = None
+
     def run_all(self) -> ModuleReport:
         report = ModuleReport(module_name="TCP Stall Test")
-        report.add(self._run_check())
+        check = self._run_check()
+        report.add(check)
+        if isinstance(check.result, TestResult):
+            report.results.append(check.result)
         report.finish()
         return report
 
     def _run_check(self) -> CheckResult:
+        check = self._run_check_legacy()
+        if check.result is not None:
+            return check
+        d, v = check.details, check.details.get("verdict")
+        res = TestResult("tcp_stall", "tcp_stall", protocol="TCP", port=443, duration_ms=check.duration_ms,
+                         metrics={k: d.get(k) for k in ("expected_bytes", "received_bytes", "verdict")},
+                         metadata={"role": "stall", "control_ok": d.get("control_ok")}, summary=check.message)
+        err = self._last_error
+        if err is not None:
+            res.error_code, res.error_type, res.error_message = err.error_code, err.error_type, err.error_message
+        S = TechnicalStatus
+        if not d.get("control_ok"):
+            res.status, res.severity = S.INCONCLUSIVE, Severity.INFO     # nothing to compare against
+        elif v == "complete":
+            res.status = S.SUCCESS
+        elif v == "stall_in_range":
+            res.status, res.interpretation, res.confidence = S.RESET if "Reset" in (d.get("error") or "") else S.PARTIAL, "STALL_IN_SUSPECT_RANGE", 0.6
+            res.severity = Severity.WARNING
+        elif v == "stall_early":
+            res.status, res.severity, res.interpretation, res.confidence = S.PARTIAL, Severity.ERROR, "EARLY_TRANSFER_FAILURE", 0.4
+        else:
+            res.status, res.severity, res.interpretation, res.confidence = S.PARTIAL, Severity.WARNING, "GENERAL_TRANSFER_PROBLEM", 0.4
+        res.add_evidence(f"Control request {'worked' if d.get('control_ok') else 'failed'}; "
+                         f"{d.get('received_bytes', 0)} of {d.get('expected_bytes', 0)} bytes received")
+        return check_from_result(check.name, res, message=check.message, details=d)
+
+    def _run_check_legacy(self) -> CheckResult:
         name = "TCP Stall (16-20 KB) Test"
         start = time.perf_counter()
 

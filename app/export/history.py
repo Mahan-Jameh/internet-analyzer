@@ -55,6 +55,27 @@ def _prune(directory: Path, keep: int = HISTORY_MAX_FILES) -> None:
             pass
 
 
+def normalize_report_dict(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Bring any saved report up to the shape of schema version 2 *without* losing or inventing data.
+    Version-1 files (no ``schema_version``) get empty ``tests`` / ``diagnoses`` and a ``run`` block
+    rebuilt from their top-level fields; unknown future keys are left untouched.
+    """
+    out = dict(data)
+    version = out.get("schema_version")
+    out["schema_version"] = version if isinstance(version, int) else 1
+    out.setdefault("run", {k: out.get(k) for k in
+                           ("generated_at", "duration_seconds", "cancelled", "profile_name", "target_host")})
+    for key in ("tests", "diagnoses", "key_findings", "interpretations", "modules"):
+        if not isinstance(out.get(key), list):
+            out[key] = []
+    if not isinstance(out.get("summary"), dict):
+        out["summary"] = {}
+    if not isinstance(out.get("network_info"), dict):
+        out["network_info"] = {}
+    return out
+
+
 def load_report(path: Path) -> dict[str, Any]:
     """Load a saved report as a plain dict. Raises ValueError for unreadable files."""
     try:
@@ -64,7 +85,7 @@ def load_report(path: Path) -> dict[str, Any]:
         raise ValueError(f"Could not read report '{path.name}': {exc}") from exc
     if not isinstance(data, dict) or "modules" not in data:
         raise ValueError(f"'{path.name}' is not a valid diagnostic report.")
-    return data
+    return normalize_report_dict(data)
 
 
 def list_history(directory: Path | None = None) -> list[HistoryEntry]:

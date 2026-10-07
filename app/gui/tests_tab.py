@@ -40,8 +40,9 @@ from app.core.worker import (
     DiagnosticWorker,
 )
 from app.gui.results_widgets import ModuleResultCard, PlaceholderCard, StatusBadge
+from app.i18n import tr, tr_fmt, translate_dynamic
 from app.logger import get_logger
-from app.models import FullReport, Interpretation, ModuleReport, NetworkInfo
+from app.models import FullReport, Interpretation, ModuleReport, NetworkInfo, Status
 
 log = get_logger(__name__)
 
@@ -59,7 +60,7 @@ class InterpretationRow(QFrame):
         badge.setFixedWidth(100)
         layout.addWidget(badge)
 
-        label = QLabel(interp.text)
+        label = QLabel(translate_dynamic(interp.text))
         label.setWordWrap(True)
         layout.addWidget(label, stretch=1)
 
@@ -92,73 +93,73 @@ class DiagnosticsTab(QWidget):
 
         # --- header ---------------------------------------------------------
         header = QHBoxLayout()
-        title = QLabel("Diagnostics")
+        title = QLabel(tr("Diagnostics"))
         title.setObjectName("sectionTitle")
         header.addWidget(title)
         header.addStretch(1)
 
-        self.run_btn = QPushButton("Run Diagnostic")
+        self.run_btn = QPushButton(tr("Run Diagnostic"))
         self.run_btn.clicked.connect(lambda: self.start_run())
         header.addWidget(self.run_btn)
 
-        self.stop_btn = QPushButton("Stop")
+        self.stop_btn = QPushButton(tr("Stop"))
         self.stop_btn.setObjectName("secondaryButton")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self._on_stop)
         header.addWidget(self.stop_btn)
 
-        self.export_btn = QPushButton("Export Report...")
+        self.export_btn = QPushButton(tr("Export Report..."))
         self.export_btn.setObjectName("secondaryButton")
         self.export_btn.setEnabled(False)
         header.addWidget(self.export_btn)
         layout.addLayout(header)
 
         # --- options --------------------------------------------------------
-        self.options_box = QGroupBox("Tests to run")
+        self.options_box = QGroupBox(tr("Tests to run"))
         options_layout = QVBoxLayout(self.options_box)
 
         grid = QGridLayout()
         self.module_checks: dict[str, QCheckBox] = {}
         for i, key in enumerate(_SELECTABLE_MODULES):
-            checkbox = QCheckBox(MODULE_DISPLAY_NAMES[key])
+            checkbox = QCheckBox(translate_dynamic(MODULE_DISPLAY_NAMES[key]))
             checkbox.setChecked(key in DEFAULT_MODULES)
             if key in OPT_IN_MODULES:
-                checkbox.setText(MODULE_DISPLAY_NAMES[key] + "  (optional)")
-                checkbox.setToolTip(
-                    "May briefly interrupt your connection (a filter can drop your packets for "
-                    "about a minute after seeing unusual traffic). You will be asked to confirm."
-                )
+                checkbox.setText(translate_dynamic(MODULE_DISPLAY_NAMES[key]) + "  " + tr("(optional)"))
+                checkbox.setToolTip(tr(
+                    "May briefly interrupt your connection (a filter can drop your packets for about a minute "
+                    "after seeing unusual traffic). You will be asked to confirm."
+                ))
             self.module_checks[key] = checkbox
             grid.addWidget(checkbox, i // 3, i % 3)
         options_layout.addLayout(grid)
 
         controls = QHBoxLayout()
-        select_all = QPushButton("Select all")
+        select_all = QPushButton(tr("Select all"))
         select_all.setObjectName("secondaryButton")
         select_all.clicked.connect(lambda: self._set_all_checks(True))
         controls.addWidget(select_all)
-        defaults = QPushButton("Default selection")
+        defaults = QPushButton(tr("Default selection"))
         defaults.setObjectName("secondaryButton")
         defaults.clicked.connect(self._reset_default_checks)
         controls.addWidget(defaults)
         controls.addStretch(1)
 
-        controls.addWidget(QLabel("Repeat"))
+        controls.addWidget(QLabel(tr("Repeat")))
         self.repeat_spin = QSpinBox()
         self.repeat_spin.setRange(1, REPEAT_MAX_COUNT)
-        self.repeat_spin.setSuffix(" time(s)")
+        self.repeat_spin.setSuffix(tr(" time(s)"))
         controls.addWidget(self.repeat_spin)
-        controls.addWidget(QLabel("every"))
+        controls.addWidget(QLabel(tr("every")))
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(0, REPEAT_MAX_INTERVAL_SECONDS)
         self.interval_spin.setValue(30)
-        self.interval_spin.setSuffix(" s")
+        self.interval_spin.setSuffix(tr(" s"))
         controls.addWidget(self.interval_spin)
         options_layout.addLayout(controls)
         layout.addWidget(self.options_box)
 
         # --- status / progress ----------------------------------------------
-        self.status_label = QLabel("Ready. Click \"Run Diagnostic\" to begin.")
+        self.status_label = QLabel(tr("Ready. Click \"Run Diagnostic\" to begin."))
         self.status_label.setObjectName("mutedLabel")
         layout.addWidget(self.status_label)
 
@@ -208,20 +209,25 @@ class DiagnosticsTab(QWidget):
 
         chosen = modules or self.selected_modules()
         if not chosen:
-            self.status_label.setText("Select at least one test to run.")
+            self.status_label.setText(tr("Select at least one test to run."))
             return
 
         if any(m in OPT_IN_MODULES for m in chosen):
-            answer = QMessageBox.warning(
-                self,
-                "Optional test may interrupt your connection",
-                "The Protocol Whitelist Probe sends unusual traffic on purpose. A network "
-                "filter that reacts to it may drop your packets for about a minute, so "
-                "websites may stop loading briefly.\n\nRun it anyway?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+            box = QMessageBox(
+                QMessageBox.Icon.Warning,
+                tr("Optional test may interrupt your connection"),
+                tr(
+                    "The Protocol Whitelist Probe sends unusual traffic on purpose. A network filter that reacts "
+                    "to it may drop your packets for about a minute, so websites may stop loading briefly.\n\n"
+                    "Run it anyway?"
+                ),
+                parent=self,
             )
-            if answer != QMessageBox.StandardButton.Yes:
+            yes_btn = box.addButton(tr("Yes"), QMessageBox.ButtonRole.YesRole)
+            no_btn = box.addButton(tr("No"), QMessageBox.ButtonRole.NoRole)
+            box.setDefaultButton(no_btn)
+            box.exec()
+            if box.clickedButton() is not yes_btn:
                 return
 
         self._last_params = {
@@ -249,16 +255,16 @@ class DiagnosticsTab(QWidget):
         self._cards.clear()
         for key in _SELECTABLE_MODULES:
             name = MODULE_DISPLAY_NAMES[key]
-            label = "WAITING" if key in worker.modules_to_run else "NOT TESTED"
+            label = "WAITING" if key in worker.modules_to_run else "NOT TESTED"   # translated by the badge
             card = PlaceholderCard(name, label)
             self._cards[name] = card
             self.results_layout.insertWidget(self.results_layout.count() - 1, card)
 
         self.progress_bar.setRange(0, len(worker.modules_to_run))
         self.progress_bar.setValue(0)
-        prefix = f"Run {self._run_index} of {self._run_total}: " if self._run_total > 1 else ""
+        prefix = tr_fmt("Run {} of {}: ", self._run_index, self._run_total) if self._run_total > 1 else ""
         self._status_prefix = prefix
-        self.status_label.setText(prefix + "Starting diagnostics...")
+        self.status_label.setText(prefix + tr("Starting diagnostics..."))
         self._set_running_ui(True)
 
         worker.progress_message.connect(self._on_progress)
@@ -275,11 +281,11 @@ class DiagnosticsTab(QWidget):
         self._repeat_timer.stop()
         if self._worker is not None and self._worker.isRunning():
             self._worker.requestInterruption()
-            self.status_label.setText("Stopping after the current test finishes...")
+            self.status_label.setText(tr("Stopping after the current test finishes..."))
             self.stop_btn.setEnabled(False)
         elif self._waiting_for_next_run:
             self._waiting_for_next_run = False
-            self.status_label.setText("Repeat series stopped.")
+            self.status_label.setText(tr("Repeat series stopped."))
             self._set_running_ui(False)
 
     def is_busy(self) -> bool:
@@ -327,7 +333,7 @@ class DiagnosticsTab(QWidget):
     # worker signals
     # ------------------------------------------------------------------ #
     def _on_progress(self, message: str) -> None:
-        self.status_label.setText(self._status_prefix + message)
+        self.status_label.setText(self._status_prefix + translate_dynamic(message))
 
     def _on_module_started(self, display_name: str) -> None:
         card = self._cards.get(display_name)
@@ -363,16 +369,16 @@ class DiagnosticsTab(QWidget):
             self._waiting_for_next_run = True
             self.stop_btn.setEnabled(True)
             self.run_btn.setEnabled(False)
-            self.status_label.setText(
-                f"Run {self._run_index - 1} of {self._run_total} finished. "
-                f"Next run in {delay} s (press Stop to cancel)."
-            )
+            self.status_label.setText(tr_fmt(
+                "Run {} of {} finished. Next run in {} s (press Stop to cancel).",
+                self._run_index - 1, self._run_total, delay,
+            ))
             self._repeat_timer.start(delay * 1000)
             return
 
-        text = "Run cancelled." if report.cancelled else "All tests completed."
+        text = tr("Run cancelled.") if report.cancelled else tr("All tests completed.")
         if report.duration_seconds is not None:
-            text += f" Took {report.duration_seconds:.0f} s."
+            text += tr_fmt(" Took {} s.", f"{report.duration_seconds:.0f}")
         self.status_label.setText(text)
         self.progress_bar.setValue(self.progress_bar.maximum())
         self._set_running_ui(False)
@@ -380,26 +386,60 @@ class DiagnosticsTab(QWidget):
 
     def _on_run_failed(self, message: str) -> None:
         self._repeats_left = 0
-        self.status_label.setText(f"The run could not be completed: {message}")
+        self.status_label.setText(tr_fmt("The run could not be completed: {}", message))
         self._set_running_ui(False)
 
     def _insert_summary(self, report: FullReport) -> None:
         summary = QFrame()
         summary.setStyleSheet("background-color:#25262f; border-radius:10px;")
         summary_layout = QVBoxLayout(summary)
-        title = QLabel("Analysis Summary")
+        title = QLabel(tr("Analysis Summary"))
         title.setObjectName("sectionTitle")
         summary_layout.addWidget(title)
-        note = QLabel(
+        note = QLabel(tr(
             "These are probabilistic interpretations based on the observed results - "
             "not definitive claims about censorship or network policy."
-        )
+        ))
         note.setObjectName("mutedLabel")
         note.setWordWrap(True)
         summary_layout.addWidget(note)
         for interp in report.interpretations:
             summary_layout.addWidget(InterpretationRow(interp))
+        findings = list(getattr(report.summary, "findings", []) or [])
+        if findings:                                   # layer 2 of the report: ticks and crosses
+            heading = QLabel(tr("Key findings"))
+            heading.setObjectName("sectionTitle")
+            summary_layout.addWidget(heading)
+            status_of = {"ok": Status.OK, "warn": Status.WARNING, "fail": Status.FAILED, "info": Status.UNKNOWN}
+            for finding in findings:
+                summary_layout.addWidget(InterpretationRow(
+                    Interpretation(finding.text, status_of.get(finding.symbol, Status.UNKNOWN))))
         self.results_layout.insertWidget(0, summary)
+
+    def show_report(self, report: FullReport) -> None:
+        """
+        Display an already finished report (used after a language switch so the
+        results on screen are re-drawn in the new language).
+        """
+        self._clear_results()
+        self._cards.clear()
+        for module in report.modules:
+            card = ModuleResultCard(module)
+            self._cards[module.module_name] = card
+            self.results_layout.insertWidget(self.results_layout.count() - 1, card)
+        shown = {m.module_name for m in report.modules}
+        for key in _SELECTABLE_MODULES:
+            name = MODULE_DISPLAY_NAMES[key]
+            if name not in shown:
+                card = PlaceholderCard(name, "NOT TESTED")
+                self._cards[name] = card
+                self.results_layout.insertWidget(self.results_layout.count() - 1, card)
+        self._insert_summary(report)
+        self._current_report = report
+        self.progress_bar.setRange(0, 1)
+        self.progress_bar.setValue(1)
+        self.status_label.setText(tr("Run cancelled.") if report.cancelled else tr("All tests completed."))
+        self.export_btn.setEnabled(True)
 
     @property
     def current_report(self) -> Optional[FullReport]:

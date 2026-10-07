@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from app.config import Paths
 from app.export.exporter import save_report
+from app.i18n import tr, tr_fmt
 from app.logger import get_logger
 from app.models import FullReport
 
@@ -34,26 +36,27 @@ class ExportDialog(QDialog):
     def __init__(self, report: FullReport, parent=None) -> None:
         super().__init__(parent)
         self.report = report
-        self.setWindowTitle("Export Report")
+        self.setWindowTitle(tr("Export Report"))
         self.setMinimumWidth(420)
 
         layout = QVBoxLayout(self)
 
-        layout.addWidget(QLabel("Select the format(s) to export:"))
+        layout.addWidget(QLabel(tr("Select the format(s) to export:")))
 
-        self.cb_txt = QCheckBox("Plain Text (.txt)")
-        self.cb_json = QCheckBox("JSON (.json)")
-        self.cb_csv = QCheckBox("CSV (.csv)")
-        self.cb_html = QCheckBox("HTML Report (.html)")
+        self.cb_txt = QCheckBox(tr("Plain Text (.txt)"))
+        self.cb_json = QCheckBox(tr("JSON (.json)"))
+        self.cb_csv = QCheckBox(tr("CSV (.csv)"))
+        self.cb_html = QCheckBox(tr("HTML Report (.html)"))
         self.cb_html.setChecked(True)
         for cb in (self.cb_txt, self.cb_json, self.cb_csv, self.cb_html):
             layout.addWidget(cb)
 
-        layout.addWidget(QLabel("Destination folder:"))
+        layout.addWidget(QLabel(tr("Destination folder:")))
         path_row = QHBoxLayout()
         self.path_input = QLineEdit(str(Paths.REPORTS_DIR))
+        self.path_input.setLayoutDirection(Qt.LayoutDirection.LeftToRight)   # file paths are LTR
         path_row.addWidget(self.path_input)
-        browse_btn = QPushButton("Browse...")
+        browse_btn = QPushButton(tr("Browse..."))
         browse_btn.setObjectName("secondaryButton")
         browse_btn.clicked.connect(self._browse)
         path_row.addWidget(browse_btn)
@@ -62,12 +65,14 @@ class ExportDialog(QDialog):
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(tr("OK"))
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText(tr("Cancel"))
         buttons.accepted.connect(self._do_export)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
     def _browse(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, "Choose Destination Folder", self.path_input.text())
+        directory = QFileDialog.getExistingDirectory(self, tr("Choose Destination Folder"), self.path_input.text())
         if directory:
             self.path_input.setText(directory)
 
@@ -83,7 +88,7 @@ class ExportDialog(QDialog):
             formats.append("html")
 
         if not formats:
-            QMessageBox.warning(self, "No Format Selected", "Please select at least one export format.")
+            QMessageBox.warning(self, tr("No Format Selected"), tr("Please select at least one export format."))
             return
 
         directory = Path(self.path_input.text().strip() or str(Paths.REPORTS_DIR))
@@ -95,12 +100,12 @@ class ExportDialog(QDialog):
                 saved_paths.append(path)
         except (OSError, ValueError) as exc:
             log.exception("Export failed")
-            QMessageBox.critical(self, "Export Failed", f"Could not export report: {exc}")
+            QMessageBox.critical(self, tr("Export Failed"), tr_fmt("Could not export report: {}", exc))
             return
 
         QMessageBox.information(
             self,
-            "Export Complete",
-            "Saved:\n" + "\n".join(str(p) for p in saved_paths),
+            tr("Export Complete"),
+            tr("Saved:\n") + "\n".join(str(p) for p in saved_paths),
         )
         self.accept()
